@@ -1,0 +1,15 @@
+{
+  "name": "line-chatgpt-translator-bot",
+  "version": "1.0.0",
+  "description": "A LINE bot that uses ChatGPT to translate messages",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "openai": "^4.0.0",
+    "node-fetch": "^3.3.2"
+  },
+  "type": "module"
+}
