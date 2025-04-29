@@ -1,3 +1,4 @@
+// /api/callback.js
 import { Configuration, OpenAIApi } from "openai";
 import fetch from "node-fetch";
 
@@ -6,8 +7,8 @@ const config = new Configuration({
 });
 const openai = new OpenAIApi(config);
 
-// In-memory storage of user language preferences (temporary for now)
-let userLanguages = {};
+// Temporary in-memory user language preferences
+let groupUserLanguages = {};
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -19,102 +20,87 @@ export default async function handler(req, res) {
 
   for (const event of events) {
     if (event.type === "message" && event.message.type === "text") {
-      const userMessage = event.message.text;
+      const userMessage = event.message.text.trim();
       const userId = event.source.userId;
       const groupId = event.source.groupId;
       const replyToken = event.replyToken;
 
-      // Handle user language setup if needed
-      if (userMessage.toLowerCase().includes("language")) {
-        await handleLanguageSetup(userId, userMessage, groupId, replyToken);
-        return;
+      if (!groupId || !userId) continue;
+
+      if (!groupUserLanguages[groupId]) {
+        groupUserLanguages[groupId] = {};
       }
 
-      // Detect language of the message
-      const detectedLanguage = await detectLanguage(userMessage);
+      // User is declaring their language(s)
+      if (userMessage.toLowerCase().includes("language") || userMessage.includes(",")) {
+        const languages = userMessage
+          .replace(/language[s]?:?/i, "")
+          .split(",")
+          .map((lang) => lang.trim());
 
-      // Translate the message for everyone
-      const translations = await getTranslations(userMessage, detectedLanguage);
+        groupUserLanguages[groupId][userId] = languages;
+        await replyToLine(replyToken, `Got it! You understand: ${languages.join(", ")}`);
+        continue;
+      }
 
-      // Send translations back to the group
-      await sendTranslations(groupId, translations, replyToken);
+      // Detect message language
+      const sourceLanguage = await detectLanguage(userMessage);
+
+      // Translate message for other users
+      const translations = await buildTranslations(userMessage, sourceLanguage, groupId, userId);
+
+      if (translations.length > 0) {
+        await replyToLine(replyToken, translations.join("\n\n"));
+      }
     }
   }
 
   res.status(200).send("OK");
 }
 
-// Function to handle language setup
-async function handleLanguageSetup(userId, userMessage, groupId, replyToken) {
-  // Simple language setup (for demo purposes)
-  const languages = userMessage.split(",").map(lang => lang.trim());
-  userLanguages[userId] = languages;
-
-  const replyMessage = `Got it! You understand: ${languages.join(", ")}`;
-  await sendReply(groupId, replyToken, replyMessage);
-}
-
-// Function to detect language (could be extended to use more powerful models or libraries)
 async function detectLanguage(text) {
   const res = await openai.createChatCompletion({
     model: "gpt-3.5-turbo",
     messages: [
-      { role: "system", content: "You are a language detection bot." },
-      { role: "user", content: `Detect the language of this text: ${text}` },
+      { role: "system", content: "Detect the language of the following message." },
+      { role: "user", content: text },
     ],
   });
+
   return res.data.choices[0].message.content.trim();
 }
 
-// Function to get translations using ChatGPT
-async function getTranslations(text, detectedLanguage) {
-  const translations = {};
+async function buildTranslations(originalText, sourceLang, groupId, senderId) {
+  const userPrefs = groupUserLanguages[groupId];
+  const translations = [];
 
-  // Loop through all users' language preferences
-  for (const userId in userLanguages) {
-    const languages = userLanguages[userId];
-
-    if (!languages.includes(detectedLanguage)) {
-      const translateTo = languages[0]; // For simplicity, translating to first language in list
-      const translation = await openai.createChatCompletion({
-        model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: `You are a translation bot. Translate the following text to ${translateTo}:` },
-          { role: "user", content: text },
-        ],
-      });
-      translations[userId] = translation.data.choices[0].message.content.trim();
+  for (const [userId, langs] of Object.entries(userPrefs)) {
+    if (userId === senderId) continue; // skip sender
+    if (!langs.includes(sourceLang)) {
+      const targetLang = langs[0]; // pick first language as target
+      const translatedText = await translateText(originalText, targetLang);
+      translations.push(`Translated for ${userId} (${targetLang}):\n${translatedText}`);
     }
   }
-
   return translations;
 }
 
-// Function to send translations back to the group
-async function sendTranslations(groupId, translations, replyToken) {
-  const messages = [];
-  for (const userId in translations) {
-    messages.push({
-      type: "text",
-      text: `User ${userId} says: ${translations[userId]}`,
-    });
-  }
-
-  await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify({
-      replyToken,
-      messages,
-    }),
+async function translateText(text, targetLang) {
+  const res = await openai.createChatCompletion({
+    model: "gpt-3.5-turbo",
+    messages: [
+      {
+        role: "system",
+        content: `Translate this to ${targetLang}. Only output the translated text.`,
+      },
+      { role: "user", content: text },
+    ],
   });
+
+  return res.data.choices[0].message.content.trim();
 }
 
-// Function to send a reply message
-async function sendReply(groupId, replyToken, message) {
+async function replyToLine(replyToken, message) {
   await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
